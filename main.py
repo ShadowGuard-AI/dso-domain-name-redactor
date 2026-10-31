@@ -1,9 +1,22 @@
 import argparse
 import logging
+import os
 import re
 import sys
 from faker import Faker
 import chardet
+
+# Real public suffixes recognised as domain endings. A dotted token whose
+# final label is not in this set is not treated as a domain, so sentence
+# joins such as "End.Start" and file names such as "file.txt" pass through.
+KNOWN_TLDS = {
+    "com", "net", "org", "edu", "gov", "mil", "int", "info", "biz",
+    "name", "pro", "museum", "travel", "jobs", "mobi", "io", "co",
+    "ai", "app", "dev", "xyz", "site", "online", "tech", "blog",
+    "news", "me", "tv", "cc", "us", "uk", "eu", "de", "fr", "es",
+    "it", "nl", "jp", "cn", "au", "ca", "in", "br", "mx", "se",
+    "no", "fi", "dk", "pl", "be", "ch", "at", "nz", "za",
+}
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -47,19 +60,44 @@ def redact_domain_name(text, language="en_US"):
         language (str): The language locale for Faker.
 
     Returns:
-        str: The redacted text.
+        tuple: The redacted text and the number of domain mentions redacted.
     """
     fake = Faker(language)
-    domain_pattern = r"([a-zA-Z0-9.-]+)\.([a-zA-Z]{2,})"  # Matches domain names. TLD must be at least 2 chars
-    
+    # Domain shaped tokens only: dot separated labels of letters, digits,
+    # hyphens and underscores, ending in a candidate suffix. Underscores
+    # are part of a label, so an underscored host name such as
+    # my_host.example.com is matched as one whole token and redacted
+    # whole, never in part.
+    label = r"[A-Za-z0-9_](?:[A-Za-z0-9_-]*[A-Za-z0-9_])?"
+    domain_pattern = (
+        r"(?<![A-Za-z0-9_.\-])(" + label + r"(?:\." + label + r")*"
+        r")\.([A-Za-z]{2,})(?![A-Za-z0-9_-])"
+    )
+    replacements = {}
+    count = [0]
+
     def replace_domain(match):
-        """Replaces the domain part while keeping the TLD."""
+        """Replaces the domain part while keeping the TLD.
+
+        Returns the match unchanged when the final label is not a real
+        suffix. One replacement is kept per distinct domain in a run, so
+        repeated mentions are replaced the same way every time.
+        """
         tld = match.group(2)
-        new_domain = fake.domain_word()
-        return f"{new_domain}.{tld}"
-    
+        if tld.lower() not in KNOWN_TLDS:
+            return match.group(0)
+        if tld != tld.lower() and tld != tld.upper():
+            # A mixed case ending such as "Start" is a sentence join,
+            # not a suffix.
+            return match.group(0)
+        key = match.group(0).lower()
+        if key not in replacements:
+            replacements[key] = f"{fake.domain_word()}.{tld}"
+        count[0] += 1
+        return replacements[key]
+
     redacted_text = re.sub(domain_pattern, replace_domain, text)
-    return redacted_text
+    return redacted_text, count[0]
 
 
 def detect_encoding(file_path):
@@ -136,6 +174,12 @@ def main():
     output_file = args.output_file
     language = args.language
 
+    if os.path.realpath(input_file) == os.path.realpath(output_file):
+        logging.error(
+            "Output file resolves to the input file; refusing in place run."
+        )
+        sys.exit(1)
+
     logging.info(f"Reading input file: {input_file}")
     text = read_file_content(input_file)
 
@@ -145,15 +189,21 @@ def main():
 
     logging.info("Redacting domain names...")
     try:
-        redacted_text = redact_domain_name(text, language)
+        redacted_text, redaction_count = redact_domain_name(text, language)
     except Exception as e:
         logging.error(f"Error during redaction: {e}")
+        sys.exit(1)
+
+    if redaction_count == 0:
+        logging.error("No domains redacted.")
         sys.exit(1)
 
     logging.info(f"Writing redacted text to: {output_file}")
     write_file_content(output_file, redacted_text)
 
-    logging.info("Domain name redaction complete.")
+    logging.info(
+        f"Domain name redaction complete. Redacted {redaction_count} domain mention(s)."
+    )
 
 
 if __name__ == "__main__":
