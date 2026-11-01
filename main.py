@@ -63,6 +63,13 @@ def redact_domain_name(text, language="en_US"):
         tuple: The redacted text and the number of domain mentions redacted.
     """
     fake = Faker(language)
+    # Two scope notes before the pattern. The suffix set at the top of the
+    # file is a fixed list, so a real domain under a suffix it does not
+    # hold is never redacted at all; the list is the whole policy. And the
+    # pattern matches a domain wherever it stands, including the part of
+    # an email address after the @: the local part before it is left
+    # exactly as written, so an address keeps its person's name and only
+    # changes its host.
     # Domain shaped tokens only: dot separated labels of letters, digits,
     # hyphens and underscores, ending in a candidate suffix. Underscores
     # are part of a label, so an underscored host name such as
@@ -92,6 +99,13 @@ def redact_domain_name(text, language="en_US"):
             return match.group(0)
         key = match.group(0).lower()
         if key not in replacements:
+            # Whatever its depth, a domain is replaced by exactly one fake
+            # label plus its suffix: mail.corp.example.com and example.com
+            # come out the same shape, and two different subdomains of one
+            # parent stay distinguishable only because their full strings
+            # keyed the map differently. The suffix casing stored is the
+            # first occurrence's, so a later EXAMPLE.COM is rewritten with
+            # the earlier mention's lowercase com.
             replacements[key] = f"{fake.domain_word()}.{tld}"
         count[0] += 1
         return replacements[key]
@@ -154,6 +168,8 @@ def write_file_content(output_file, content):
         content (str): The content to write.
     """
     try:
+        # Output is always utf-8, whatever encoding the input was detected
+        # and read in, so a run can re-encode a file as well as redact it.
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(content)
     except Exception as e:
